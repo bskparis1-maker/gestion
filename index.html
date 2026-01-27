@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ma Gestion d'Argent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- HEADER -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="avatar">F</div>
+        <div class="brand-text">
+          <div class="brand-title">Ma Gestion d'Argent</div>
+          <div class="brand-subtitle">Suis ton argent, construis ton futur.</div>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="currency-switch">
+          <button class="currency-btn active" data-currency="XOF">FCFA</button>
+          <button class="currency-btn" data-currency="EUR">€</button>
+          <button class="currency-btn" data-currency="USD">$</button>
+        </div>
+        <div class="theme-dummy">
+          <span>🌙</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- MAIN -->
+    <main class="app-main">
+
+      <div class="main-grid">
+
+        <!-- COLONNE GAUCHE -->
+        <div class="col-left">
+
+          <!-- TABLEAU DE BORD -->
+          <section class="card dashboard-card">
+            <div class="dashboard-header">
+              <h2>Tableau de bord</h2>
+
+              <div class="dashboard-filters">
+                <label for="filter-from">De</label>
+                <input type="date" id="filter-from" />
+                <label for="filter-to">À</label>
+                <input type="date" id="filter-to" />
+                <button id="filter-apply" class="btn small">Filtrer</button>
+                <button id="filter-reset" class="btn small ghost">Réinitialiser</button>
+              </div>
+            </div>
+
+            <div class="dashboard-stats">
+              <div class="stat-card income">
+                <div class="stat-label">Entrées</div>
+                <div class="stat-main" id="dash-income">0 FCFA</div>
+                <div class="stat-sub" id="dash-income-detail">≈ 0€ • 0$</div>
+              </div>
+              <div class="stat-card expense">
+                <div class="stat-label">Sorties</div>
+                <div class="stat-main" id="dash-expense">0 FCFA</div>
+                <div class="stat-sub" id="dash-expense-detail">≈ 0€ • 0$</div>
+              </div>
+              <div class="stat-card balance">
+                <div class="stat-label">Solde net</div>
+                <div class="stat-main" id="dash-balance">0 FCFA</div>
+                <div class="stat-sub" id="dash-balance-detail">≈ 0€ • 0$</div>
+              </div>
+            </div>
+
+            <div class="dashboard-charts">
+              <div class="chart-card">
+                <h3>Évolution du solde</h3>
+                <canvas id="balance-chart"></canvas>
+              </div>
+              <div class="chart-card">
+                <h3>Dépenses par catégorie</h3>
+                <canvas id="category-chart"></canvas>
+              </div>
+            </div>
+          </section>
+
+          <!-- ENTRÉES / SORTIES -->
+          <section class="card">
+            <div class="card-header-row">
+              <h2>Entrées & Sorties</h2>
+            </div>
+
+            <form id="transaction-form" class="transaction-form">
+              <select name="type" required>
+                <option value="income">Entrée</option>
+                <option value="expense">Sortie</option>
+              </select>
+
+              <input type="number" name="amount" min="1" placeholder="Montant (FCFA)" required />
+
+              <input type="date" name="date" required />
+
+              <input type="text" name="category" placeholder="Catégorie" />
+
+              <input type="text" name="note" placeholder="Note (optionnel)" />
+
+              <button type="submit" class="btn">Ajouter</button>
+            </form>
+
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Montant</th>
+                    <th>Date</th>
+                    <th>Catégorie</th>
+                    <th>Note</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="transactions-body">
+                  <!-- lignes ajoutées par JS -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        </div>
+
+        <!-- COLONNE DROITE -->
+        <div class="col-right">
+
+          <!-- COFFRETS -->
+          <section class="card">
+            <h2>Coffrets d'épargne</h2>
+
+            <form id="coffret-create-form" class="coffret-create-form">
+              <input type="text" name="name" placeholder="Nom du coffret (ex: Voyage)" required />
+              <input type="number" name="goal" min="1" placeholder="Objectif (FCFA)" required />
+              <button type="submit" class="btn small">Créer</button>
+            </form>
+
+            <div class="coffret-actions">
+              <select id="coffret-select">
+                <option value="">Choisir un coffret</option>
+              </select>
+              <input type="number" id="coffret-amount" min="1" placeholder="Montant (FCFA)" />
+              <button id="coffret-add" class="btn small">Ajouter</button>
+            </div>
+
+            <div id="coffrets-list" class="coffrets-list">
+              <!-- coffrets rendus par JS -->
+            </div>
+          </section>
+
+          <!-- PATRIMOINE OR / ARGENT / CRYPTO -->
+          <section class="card">
+            <h2>Patrimoine Or, Argent & Crypto</h2>
+
+            <div class="metals-section">
+              <h3>Métaux précieux</h3>
+              <form id="metals-form" class="metals-form">
+                <div class="metals-row">
+                  <label>Or (grammes)</label>
+                  <input type="number" name="gold" min="0" step="0.01" />
+                </div>
+                <div class="metals-row">
+                  <label>Argent (grammes)</label>
+                  <input type="number" name="silver" min="0" step="0.01" />
+                </div>
+                <button type="submit" class="btn small">Mettre à jour</button>
+              </form>
+              <p class="hint">
+                Les prix de l'or et de l'argent sont fixes dans le code (tu peux les modifier).
+              </p>
+              <p id="metals-value" class="highlight-line">0 FCFA • 0€ • 0$</p>
+            </div>
+
+            <div class="crypto-section">
+              <h3>Cryptomonnaies</h3>
+              <form id="crypto-form" class="crypto-form">
+                <input type="text" name="symbol" placeholder="Symbole (ex: BTC)" required />
+                <input type="number" name="amount" step="0.000001" min="0" placeholder="Quantité" required />
+                <input type="number" name="price" min="0" step="1" placeholder="Prix 1 unité (FCFA)" required />
+                <button type="submit" class="btn small">Ajouter / Mettre à jour</button>
+              </form>
+
+              <div class="table-responsive">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Symbole</th>
+                      <th>Quantité</th>
+                      <th>Valeur</th>
+                    </tr>
+                  </thead>
+                  <tbody id="crypto-body">
+                    <!-- lignes ajoutées par JS -->
+                  </tbody>
+                </table>
+              </div>
+
+              <p id="crypto-total" class="highlight-line">0 FCFA • 0€ • 0$</p>
+            </div>
+          </section>
+
+          <!-- CONSEILS -->
+          <section class="card">
+            <h2>Conseils & éducation financière</h2>
+            <ul class="tips">
+              <li>Construis un fonds d'urgence avant d'investir.</li>
+              <li>Note chaque dépense, même les petites.</li>
+              <li>Ne mets jamais tout ton argent dans une seule crypto.</li>
+              <li>La régularité = richesse. Avance un peu chaque jour.</li>
+            </ul>
+          </section>
+
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Librairies -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
