@@ -49,6 +49,87 @@ function saveData() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
+// ---------- SYNC LECTURE GOOGLE SHEETS (JSONP pour éviter CORS) ----------
+
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cbName = `__cb_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const script = document.createElement("script");
+
+    const cleanup = () => {
+      try { delete window[cbName]; } catch {}
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+
+    window[cbName] = (payload) => {
+      cleanup();
+      resolve(payload);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("JSONP error"));
+    };
+
+    const sep = url.includes("?") ? "&" : "?";
+    script.src = `${url}${sep}callback=${cbName}`;
+    document.body.appendChild(script);
+  });
+}
+
+async function syncFromSheetOnStartup() {
+  if (!SHEET_WEBHOOK_URL) return;
+
+  try {
+    const payload = await jsonp(`${SHEET_WEBHOOK_URL}?kind=all`);
+
+    // On ne remplace que si local est vide (pour éviter d'écraser ton tel/pc)
+    if (Array.isArray(payload.transactions) && data.transactions.length === 0) {
+      data.transactions = payload.transactions;
+    }
+
+    if (Array.isArray(payload.coffrets) && data.coffrets.length === 0) {
+      data.coffrets = payload.coffrets;
+    }
+
+    if (payload.metals && (data.metals.goldGrams === 0 && data.metals.silverGrams === 0)) {
+      data.metals = {
+        goldGrams: Number(payload.metals.goldGrams) || 0,
+        silverGrams: Number(payload.metals.silverGrams) || 0
+      };
+    }
+
+    if (Array.isArray(payload.cryptos) && data.cryptos.length === 0) {
+      data.cryptos = payload.cryptos;
+    }
+
+    // Si historique vide, on initialise au moins un point avec l'état actuel
+    const today = new Date().toISOString().split("T")[0];
+
+    if (data.metalsHistory.length === 0) {
+      const goldPriceXOF = 40000;
+      const silverPriceXOF = 500;
+      const total =
+        (data.metals.goldGrams || 0) * goldPriceXOF +
+        (data.metals.silverGrams || 0) * silverPriceXOF;
+      if (total > 0) data.metalsHistory.push({ date: today, totalXOF: total });
+    }
+
+    if (data.cryptoHistory.length === 0) {
+      const totalValue = (data.cryptos || []).reduce(
+        (sum, c) => sum + (Number(c.quantity) || 0) * (Number(c.price) || 0),
+        0
+      );
+      if (totalValue > 0) data.cryptoHistory.push({ date: today, totalXOF: totalValue });
+    }
+
+    saveData();
+    console.log("Sync depuis Google Sheets ✅");
+  } catch (err) {
+    console.warn("Sync Google Sheets impossible (offline ou accès) :", err);
+  }
+}
+
 // ---------- UTILITAIRES ----------
 
 function formatNumber(n) {
@@ -117,44 +198,25 @@ function sendToSheet(payload) {
   fetch(SHEET_WEBHOOK_URL, {
     method: "POST",
     mode: "no-cors",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  }).catch((err) => {
-    console.error("Erreur envoi vers Sheets :", err);
-  });
+  }).catch((err) => console.error("Erreur envoi vers Sheets :", err));
 }
 
 function sendTransactionToSheet(tx) {
-  sendToSheet({
-    kind: "transaction",
-    ...tx,
-  });
+  sendToSheet({ kind: "transaction", ...tx });
 }
-
 function sendCoffretEventToSheet(evt) {
-  sendToSheet({
-    kind: "coffret",
-    ...evt,
-  });
+  sendToSheet({ kind: "coffret", ...evt });
 }
-
 function sendMetalsToSheet(metals) {
-  sendToSheet({
-    kind: "metals",
-    ...metals,
-  });
+  sendToSheet({ kind: "metals", ...metals });
 }
-
 function sendCryptoToSheet(cr) {
-  sendToSheet({
-    kind: "crypto",
-    ...cr,
-  });
+  sendToSheet({ kind: "crypto", ...cr });
 }
 
-// ---------- BUDGET / CALCULATEUR DEPENSES ----------
+// ---------- BUDGET ----------
 
 function computeExpenseSumForPeriod(period) {
   const now = new Date();
@@ -171,9 +233,7 @@ function computeExpenseSumForPeriod(period) {
     if (t.type !== "expense") return;
     const d = new Date(t.date);
     if (isNaN(d)) return;
-    if (d >= from && d <= now) {
-      sum += Number(t.amount) || 0;
-    }
+    if (d >= from && d <= now) sum += Number(t.amount) || 0;
   });
   return sum;
 }
@@ -203,7 +263,6 @@ function setupBudgetForm() {
   if (!form) return;
 
   const periodSelect = document.getElementById("budget-period");
-
   if (data.budget && data.budget.limit) {
     periodSelect.value = data.budget.period || "monthly";
   }
@@ -225,25 +284,20 @@ function setupBudgetForm() {
   });
 }
 
-// ---------- RENDU : DASHBOARD ----------
+// ---------- DASHBOARD ----------
 
 function renderDashboard() {
   const now = new Date();
   const currentKey = `${now.getFullYear()}-${now.getMonth() + 1}`;
 
   const filtered = getFilteredTransactions();
-
   let total = 0;
   let monthIncome = 0;
   let monthExpense = 0;
 
   filtered.forEach((t) => {
     const amount = Number(t.amount) || 0;
-    if (t.type === "income") {
-      total += amount;
-    } else {
-      total -= amount;
-    }
+    total += t.type === "income" ? amount : -amount;
 
     if (getMonthKey(t.date) === currentKey) {
       if (t.type === "income") monthIncome += amount;
@@ -267,7 +321,7 @@ function renderDashboard() {
   renderCharts();
 }
 
-// ---------- RENDU : TRANSACTIONS ----------
+// ---------- TRANSACTIONS (table + delete) ----------
 
 function renderTransactions() {
   const tbody = document.getElementById("transactions-body");
@@ -287,10 +341,7 @@ function renderTransactions() {
       <td>${t.category || ""}</td>
       <td>${t.note || ""}</td>
       <td>
-        <button
-          class="btn small danger delete-tx"
-          data-index="${t._index}"
-        >
+        <button class="btn small danger delete-tx" data-index="${t._index}">
           Supprimer
         </button>
       </td>
@@ -317,7 +368,7 @@ function renderTransactions() {
   };
 }
 
-// ---------- RENDU : COFFRETS ----------
+// ---------- COFFRETS ----------
 
 function renderCoffrets() {
   const list = document.getElementById("coffrets-list");
@@ -335,9 +386,7 @@ function renderCoffrets() {
     item.innerHTML = `
       <div>
         <strong>${c.name}</strong><br/>
-        <span>${formatNumber(c.balance)} / ${formatNumber(c.goal)} FCFA (${Math.round(
-      progress
-    )}%)</span>
+        <span>${formatNumber(c.balance)} / ${formatNumber(c.goal)} FCFA (${Math.round(progress)}%)</span>
       </div>
       <div>
         <button class="btn small" data-edit-index="${index}">Modifier</button>
@@ -351,7 +400,6 @@ function renderCoffrets() {
     select.appendChild(opt);
   });
 
-  // boutons Modifier
   list.querySelectorAll("button[data-edit-index]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.editIndex);
@@ -361,10 +409,7 @@ function renderCoffrets() {
       const newName = prompt("Nouveau nom du coffret :", coffret.name);
       if (!newName) return;
 
-      const newGoalStr = prompt(
-        "Nouvel objectif (FCFA) :",
-        coffret.goal.toString()
-      );
+      const newGoalStr = prompt("Nouvel objectif (FCFA) :", coffret.goal.toString());
       const newGoal = Number(newGoalStr);
       if (isNaN(newGoal) || newGoal <= 0) {
         alert("Objectif invalide.");
@@ -375,30 +420,36 @@ function renderCoffrets() {
       coffret.goal = newGoal;
       saveData();
       renderCoffrets();
+
+      // option : envoyer event update
+      sendCoffretEventToSheet({
+        action: "update",
+        name: newName,
+        goal: newGoal,
+        balance: coffret.balance
+      });
     });
   });
 }
 
-// ---------- RENDU : METAUX ----------
+// ---------- METAUX ----------
 
 function renderMetals() {
   const goldPriceXOF = 40000;
   const silverPriceXOF = 500;
 
-  const goldValue = data.metals.goldGrams * goldPriceXOF;
-  const silverValue = data.metals.silverGrams * silverPriceXOF;
-  const total = goldValue + silverValue;
+  const total =
+    (data.metals.goldGrams || 0) * goldPriceXOF +
+    (data.metals.silverGrams || 0) * silverPriceXOF;
 
   const eur = total * data.rates.EUR;
   const usd = total * data.rates.USD;
 
   const el = document.getElementById("metals-value");
-  el.textContent = `${formatNumber(total)} FCFA • ${formatNumber(
-    eur
-  )} € • ${formatNumber(usd)} $`;
+  el.textContent = `${formatNumber(total)} FCFA • ${formatNumber(eur)} € • ${formatNumber(usd)} $`;
 }
 
-// ---------- RENDU : CRYPTOS ----------
+// ---------- CRYPTOS ----------
 
 function renderCryptos() {
   const tbody = document.getElementById("crypto-body");
@@ -408,7 +459,7 @@ function renderCryptos() {
   let total = 0;
 
   data.cryptos.forEach((c) => {
-    const value = c.quantity * c.price;
+    const value = (Number(c.quantity) || 0) * (Number(c.price) || 0);
     total += value;
 
     const tr = document.createElement("tr");
@@ -423,12 +474,10 @@ function renderCryptos() {
   const eur = total * data.rates.EUR;
   const usd = total * data.rates.USD;
 
-  totalEl.textContent = `${formatNumber(total)} FCFA • ${formatNumber(
-    eur
-  )} € • ${formatNumber(usd)} $`;
+  totalEl.textContent = `${formatNumber(total)} FCFA • ${formatNumber(eur)} € • ${formatNumber(usd)} $`;
 }
 
-// ---------- GRAPHIQUES (Chart.js) ----------
+// ---------- GRAPHIQUES DASHBOARD ----------
 
 function renderCharts() {
   const lineCanvas = document.getElementById("balance-chart");
@@ -439,6 +488,7 @@ function renderCharts() {
     .slice()
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
+  // solde cumulé
   const byDate = new Map();
   txs.forEach((t) => {
     const d = t.date;
@@ -450,7 +500,10 @@ function renderCharts() {
   const lineLabels = [];
   const lineData = [];
   let cumulative = 0;
-  byDate.forEach((delta, date) => {
+
+  // Important: Map conserve l'ordre d'insertion, donc on re-trie par date
+  const entries = Array.from(byDate.entries()).sort((a, b) => new Date(a[0]) - new Date(b[0]));
+  entries.forEach(([date, delta]) => {
     cumulative += delta;
     lineLabels.push(date);
     lineData.push(convertXOFToActiveNumber(cumulative));
@@ -461,6 +514,7 @@ function renderCharts() {
     lineData.push(0);
   }
 
+  // camembert
   const catMap = new Map();
   txs.forEach((t) => {
     if (t.type !== "expense") return;
@@ -471,7 +525,6 @@ function renderCharts() {
 
   let pieLabels = [];
   let pieData = [];
-
   catMap.forEach((amount, cat) => {
     pieLabels.push(cat);
     pieData.push(convertXOFToActiveNumber(amount));
@@ -482,16 +535,7 @@ function renderCharts() {
     pieData = [1];
   }
 
-  const pieColors = [
-    "#34d399",
-    "#60a5fa",
-    "#f472b6",
-    "#facc15",
-    "#fb923c",
-    "#a78bfa",
-    "#4ade80",
-    "#fca5a5",
-  ];
+  const pieColors = ["#34d399", "#60a5fa", "#f472b6", "#facc15", "#fb923c", "#a78bfa", "#4ade80", "#fca5a5"];
 
   if (!balanceChart) {
     const ctx = lineCanvas.getContext("2d");
@@ -499,52 +543,34 @@ function renderCharts() {
       type: "line",
       data: {
         labels: lineLabels,
-        datasets: [
-          {
-            label: "Solde",
-            data: lineData,
-            borderWidth: 2,
-            tension: 0.4,
-            pointRadius: 0,
-            pointHitRadius: 8,
-            borderColor: "#22c55e",
-            fill: true,
-            backgroundColor: (context) => {
-              const { chart } = context;
-              const { ctx, chartArea } = chart;
-              if (!chartArea) return "rgba(34, 197, 94, 0)";
-              const gradient = ctx.createLinearGradient(
-                0,
-                chartArea.top,
-                0,
-                chartArea.bottom
-              );
-              gradient.addColorStop(0, "rgba(34, 197, 94, 0.35)");
-              gradient.addColorStop(1, "rgba(34, 197, 94, 0)");
-              return gradient;
-            },
+        datasets: [{
+          label: "Solde",
+          data: lineData,
+          borderWidth: 2,
+          tension: 0.4,
+          pointRadius: 0,
+          borderColor: "#22c55e",
+          fill: true,
+          backgroundColor: (context) => {
+            const { chart } = context;
+            const { ctx, chartArea } = chart;
+            if (!chartArea) return "rgba(34, 197, 94, 0)";
+            const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+            gradient.addColorStop(0, "rgba(34, 197, 94, 0.35)");
+            gradient.addColorStop(1, "rgba(34, 197, 94, 0)");
+            return gradient;
           },
-        ],
+        }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false },
-        },
+        plugins: { legend: { display: false } },
         scales: {
-          x: {
-            ticks: { color: "#9ca3af" },
-            grid: { display: false },
-          },
-          y: {
-            ticks: { color: "#9ca3af" },
-            grid: {
-              color: "#111827",
-            },
-          },
-        },
-      },
+          x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
+          y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
+        }
+      }
     });
   } else {
     balanceChart.data.labels = lineLabels;
@@ -555,27 +581,14 @@ function renderCharts() {
   if (!categoryChart) {
     categoryChart = new Chart(pieCanvas.getContext("2d"), {
       type: "pie",
-      data: {
-        labels: pieLabels,
-        datasets: [
-          {
-            data: pieData,
-            backgroundColor: pieColors,
-            borderColor: "#020617",
-            borderWidth: 1,
-          },
-        ],
-      },
+      data: { labels: pieLabels, datasets: [{ data: pieData, backgroundColor: pieColors, borderColor: "#020617", borderWidth: 1 }] },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: {
-            position: "bottom",
-            labels: { color: "#e5e7eb", font: { size: 10 } },
-          },
-        },
-      },
+          legend: { position: "bottom", labels: { color: "#e5e7eb", font: { size: 10 } } }
+        }
+      }
     });
   } else {
     categoryChart.data.labels = pieLabels;
@@ -592,45 +605,26 @@ function renderMetalsCryptoCharts() {
   const metalsCanvas = document.getElementById("metals-chart");
   const cryptoCanvas = document.getElementById("crypto-chart");
 
-  // METALS
   if (metalsCanvas) {
     const labels = data.metalsHistory.map((h) => h.date);
-    const values = data.metalsHistory.map((h) =>
-      convertXOFToActiveNumber(h.totalXOF)
-    );
+    const values = data.metalsHistory.map((h) => convertXOFToActiveNumber(h.totalXOF));
 
     if (!metalsChart) {
       metalsChart = new Chart(metalsCanvas.getContext("2d"), {
         type: "line",
         data: {
           labels,
-          datasets: [
-            {
-              label: "Valeur métaux",
-              data: values,
-              borderWidth: 2,
-              tension: 0.3,
-              pointRadius: 0,
-              borderColor: "#facc15",
-              fill: false,
-            },
-          ],
+          datasets: [{ label: "Valeur métaux", data: values, borderWidth: 2, tension: 0.3, pointRadius: 0, borderColor: "#facc15", fill: false }]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           plugins: { legend: { display: false } },
           scales: {
-            x: {
-              ticks: { color: "#9ca3af" },
-              grid: { display: false },
-            },
-            y: {
-              ticks: { color: "#9ca3af" },
-              grid: { color: "#111827" },
-            },
-          },
-        },
+            x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
+            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
+          }
+        }
       });
     } else {
       metalsChart.data.labels = labels;
@@ -639,45 +633,26 @@ function renderMetalsCryptoCharts() {
     }
   }
 
-  // CRYPTO
   if (cryptoCanvas) {
     const labels = data.cryptoHistory.map((h) => h.date);
-    const values = data.cryptoHistory.map((h) =>
-      convertXOFToActiveNumber(h.totalXOF)
-    );
+    const values = data.cryptoHistory.map((h) => convertXOFToActiveNumber(h.totalXOF));
 
     if (!cryptoChart) {
       cryptoChart = new Chart(cryptoCanvas.getContext("2d"), {
         type: "line",
         data: {
           labels,
-          datasets: [
-            {
-              label: "Valeur crypto",
-              data: values,
-              borderWidth: 2,
-              tension: 0.3,
-              pointRadius: 0,
-              borderColor: "#3b82f6",
-              fill: false,
-            },
-          ],
+          datasets: [{ label: "Valeur crypto", data: values, borderWidth: 2, tension: 0.3, pointRadius: 0, borderColor: "#3b82f6", fill: false }]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           plugins: { legend: { display: false } },
           scales: {
-            x: {
-              ticks: { color: "#9ca3af" },
-              grid: { display: false },
-            },
-            y: {
-              ticks: { color: "#9ca3af" },
-              grid: { color: "#111827" },
-            },
-          },
-        },
+            x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
+            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
+          }
+        }
       });
     } else {
       cryptoChart.data.labels = labels;
@@ -687,20 +662,19 @@ function renderMetalsCryptoCharts() {
   }
 }
 
-// ---------- NAV / CURRENCY / FILTRES ----------
+// ---------- UI : devise / filtres / catégories ----------
 
 function setupCurrencySwitch() {
   const buttons = document.querySelectorAll(".currency-btn");
   buttons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      const cur = btn.dataset.currency;
-      state.activeCurrency = cur;
-
+      state.activeCurrency = btn.dataset.currency;
       buttons.forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
 
       renderDashboard();
       renderMetalsCryptoCharts();
+      renderBudgetInfo();
     });
   });
 }
@@ -730,8 +704,6 @@ function setupFilters() {
   });
 }
 
-// ---------- CATEGORIES PREDEFINIES ----------
-
 const EXPENSE_CATEGORIES = [
   "dépense boutique",
   "dépense maison",
@@ -756,10 +728,9 @@ function fillCategorySelect(type) {
   const otherInput = document.getElementById("tx-category-other");
   if (!select) return;
 
-  const categories =
-    type === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
-
+  const categories = type === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
   select.innerHTML = "";
+
   categories.forEach((cat) => {
     const opt = document.createElement("option");
     opt.value = cat;
@@ -767,9 +738,8 @@ function fillCategorySelect(type) {
     select.appendChild(opt);
   });
 
-  if (select.value === "autres") {
-    otherInput.style.display = "block";
-  } else {
+  if (select.value === "autres") otherInput.style.display = "block";
+  else {
     otherInput.style.display = "none";
     otherInput.value = "";
   }
@@ -786,14 +756,10 @@ function setupTransactionForm() {
 
   fillCategorySelect("income");
 
-  typeSelect.addEventListener("change", () => {
-    fillCategorySelect(typeSelect.value);
-  });
-
+  typeSelect.addEventListener("change", () => fillCategorySelect(typeSelect.value));
   categorySelect.addEventListener("change", () => {
-    if (categorySelect.value === "autres") {
-      otherInput.style.display = "block";
-    } else {
+    if (categorySelect.value === "autres") otherInput.style.display = "block";
+    else {
       otherInput.style.display = "none";
       otherInput.value = "";
     }
@@ -823,20 +789,10 @@ function setupTransactionForm() {
       if (custom) category = custom;
     }
 
+    // conversion vers XOF
     let amountXOF = rawAmount;
-    if (currency === "EUR") {
-      if (!data.rates.EUR) {
-        alert("Taux EUR manquant dans les paramètres.");
-        return;
-      }
-      amountXOF = rawAmount / data.rates.EUR;
-    } else if (currency === "USD") {
-      if (!data.rates.USD) {
-        alert("Taux USD manquant dans les paramètres.");
-        return;
-      }
-      amountXOF = rawAmount / data.rates.USD;
-    }
+    if (currency === "EUR") amountXOF = rawAmount / data.rates.EUR;
+    else if (currency === "USD") amountXOF = rawAmount / data.rates.USD;
 
     const tx = {
       type,
@@ -850,10 +806,7 @@ function setupTransactionForm() {
 
     data.transactions.push(tx);
     saveData();
-
-    if (typeof sendTransactionToSheet === "function") {
-      sendTransactionToSheet(tx);
-    }
+    sendTransactionToSheet(tx);
 
     form.reset();
     typeSelect.value = "income";
@@ -875,7 +828,7 @@ function setupCoffretForms() {
   createForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const fd = new FormData(createForm);
-    const name = fd.get("name");
+    const name = (fd.get("name") || "").toString().trim();
     const goal = Number(fd.get("goal"));
 
     if (!name || isNaN(goal) || goal <= 0) {
@@ -886,13 +839,7 @@ function setupCoffretForms() {
     data.coffrets.push({ name, goal, balance: 0 });
     saveData();
 
-    sendCoffretEventToSheet({
-      action: "create",
-      name,
-      goal,
-      amount: 0,
-      balance: 0,
-    });
+    sendCoffretEventToSheet({ action: "create", name, goal, amount: 0, balance: 0 });
 
     createForm.reset();
     renderCoffrets();
@@ -902,14 +849,8 @@ function setupCoffretForms() {
     const index = select.value;
     const amount = Number(amountInput.value);
 
-    if (index === "") {
-      alert("Choisis un coffret d'abord.");
-      return;
-    }
-    if (isNaN(amount) || amount <= 0) {
-      alert("Montant invalide.");
-      return;
-    }
+    if (index === "") return alert("Choisis un coffret d'abord.");
+    if (isNaN(amount) || amount <= 0) return alert("Montant invalide.");
 
     data.coffrets[index].balance += amount;
     const newBalance = data.coffrets[index].balance;
@@ -918,12 +859,7 @@ function setupCoffretForms() {
     amountInput.value = "";
     saveData();
 
-    sendCoffretEventToSheet({
-      action: "deposit",
-      name,
-      amount,
-      balance: newBalance,
-    });
+    sendCoffretEventToSheet({ action: "deposit", name, amount, balance: newBalance });
 
     renderCoffrets();
   });
@@ -945,15 +881,13 @@ function setupMetalsForm() {
     const total =
       data.metals.goldGrams * goldPriceXOF +
       data.metals.silverGrams * silverPriceXOF;
+
     const today = new Date().toISOString().split("T")[0];
     data.metalsHistory.push({ date: today, totalXOF: total });
 
     saveData();
+    sendMetalsToSheet({ goldGrams: data.metals.goldGrams, silverGrams: data.metals.silverGrams });
 
-    sendMetalsToSheet({
-      goldGrams: data.metals.goldGrams,
-      silverGrams: data.metals.silverGrams,
-    });
     renderMetals();
     renderMetalsCryptoCharts();
   });
@@ -983,19 +917,14 @@ function setupCryptoForm() {
     }
 
     const totalValue = data.cryptos.reduce(
-      (sum, c) => sum + c.quantity * c.price,
+      (sum, c) => sum + (Number(c.quantity) || 0) * (Number(c.price) || 0),
       0
     );
     const today = new Date().toISOString().split("T")[0];
     data.cryptoHistory.push({ date: today, totalXOF: totalValue });
 
     saveData();
-
-    sendCryptoToSheet({
-      symbol,
-      quantity,
-      price,
-    });
+    sendCryptoToSheet({ symbol, quantity, price });
 
     form.reset();
     renderCryptos();
@@ -1005,8 +934,11 @@ function setupCryptoForm() {
 
 // ---------- INIT ----------
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   loadData();
+
+  // Si le navigateur efface localStorage, on récupère depuis Sheets
+  await syncFromSheetOnStartup();
 
   setupCurrencySwitch();
   setupFilters();
