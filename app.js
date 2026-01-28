@@ -13,6 +13,12 @@ let data = {
     EUR: 0.0015,
     USD: 0.0017,
   },
+  metalsHistory: [], // { date, totalXOF }
+  cryptoHistory: [], // { date, totalXOF }
+  budget: {
+    period: "monthly",
+    limit: 0,
+  },
 };
 
 let state = {
@@ -23,6 +29,8 @@ let state = {
 
 let balanceChart = null;
 let categoryChart = null;
+let metalsChart = null;
+let cryptoChart = null;
 
 // ---------- LOCALSTORAGE ----------
 
@@ -119,7 +127,6 @@ function sendToSheet(payload) {
 }
 
 function sendTransactionToSheet(tx) {
-  // tx = { type, amount, date, category, note }
   sendToSheet({
     kind: "transaction",
     ...tx,
@@ -127,7 +134,6 @@ function sendTransactionToSheet(tx) {
 }
 
 function sendCoffretEventToSheet(evt) {
-  // evt = { action, name, goal?, amount?, balance? }
   sendToSheet({
     kind: "coffret",
     ...evt,
@@ -135,7 +141,6 @@ function sendCoffretEventToSheet(evt) {
 }
 
 function sendMetalsToSheet(metals) {
-  // metals = { goldGrams, silverGrams }
   sendToSheet({
     kind: "metals",
     ...metals,
@@ -143,12 +148,83 @@ function sendMetalsToSheet(metals) {
 }
 
 function sendCryptoToSheet(cr) {
-  // cr = { symbol, quantity, price }
   sendToSheet({
     kind: "crypto",
     ...cr,
   });
 }
+
+// ---------- BUDGET / CALCULATEUR DEPENSES ----------
+
+function computeExpenseSumForPeriod(period) {
+  const now = new Date();
+  let from = new Date(now);
+
+  if (period === "weekly") {
+    from.setDate(now.getDate() - 7);
+  } else {
+    from = new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+
+  let sum = 0;
+  data.transactions.forEach((t) => {
+    if (t.type !== "expense") return;
+    const d = new Date(t.date);
+    if (isNaN(d)) return;
+    if (d >= from && d <= now) {
+      sum += Number(t.amount) || 0;
+    }
+  });
+  return sum;
+}
+
+function renderBudgetInfo() {
+  const info = document.getElementById("budget-info");
+  if (!info || !data.budget || !data.budget.limit) {
+    if (info) info.textContent = "Aucun budget défini pour le moment.";
+    return;
+  }
+
+  const period = data.budget.period;
+  const limit = data.budget.limit;
+  const spent = computeExpenseSumForPeriod(period);
+  const remaining = limit - spent;
+
+  const periodText = period === "weekly" ? "cette semaine" : "ce mois";
+
+  info.textContent =
+    `Budget ${periodText} : ${formatNumber(limit)} FCFA • ` +
+    `Dépensé : ${formatNumber(spent)} FCFA • ` +
+    `Reste : ${formatNumber(Math.max(remaining, 0))} FCFA`;
+}
+
+function setupBudgetForm() {
+  const form = document.getElementById("budget-form");
+  if (!form) return;
+
+  const periodSelect = document.getElementById("budget-period");
+
+  if (data.budget && data.budget.limit) {
+    periodSelect.value = data.budget.period || "monthly";
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const period = fd.get("period");
+    const limit = Number(fd.get("limit"));
+
+    if (isNaN(limit) || limit <= 0) {
+      alert("Montant de budget invalide.");
+      return;
+    }
+
+    data.budget = { period, limit };
+    saveData();
+    renderBudgetInfo();
+  });
+}
+
 // ---------- RENDU : DASHBOARD ----------
 
 function renderDashboard() {
@@ -197,7 +273,6 @@ function renderTransactions() {
   const tbody = document.getElementById("transactions-body");
   tbody.innerHTML = "";
 
-  // On garde l'index réel de chaque transaction
   const filtered = data.transactions
     .map((t, index) => ({ ...t, _index: index }))
     .filter((t) => isWithinFilter(t.date))
@@ -223,7 +298,6 @@ function renderTransactions() {
     tbody.appendChild(tr);
   });
 
-  // Un seul écouteur pour tout le tableau (délégation d'événement)
   tbody.onclick = (e) => {
     const target = e.target;
     if (!target.classList.contains("delete-tx")) return;
@@ -234,13 +308,12 @@ function renderTransactions() {
     const ok = confirm("Supprimer cette ligne ?");
     if (!ok) return;
 
-    // On enlève la transaction du tableau principal
     data.transactions.splice(idx, 1);
     saveData();
 
-    // On rafraîchit tout
     renderTransactions();
     renderDashboard();
+    renderBudgetInfo();
   };
 }
 
@@ -249,6 +322,7 @@ function renderTransactions() {
 function renderCoffrets() {
   const list = document.getElementById("coffrets-list");
   const select = document.getElementById("coffret-select");
+  if (!list || !select) return;
 
   list.innerHTML = "";
   select.innerHTML = `<option value="">Choisir un coffret</option>`;
@@ -265,6 +339,9 @@ function renderCoffrets() {
       progress
     )}%)</span>
       </div>
+      <div>
+        <button class="btn small" data-edit-index="${index}">Modifier</button>
+      </div>
     `;
     list.appendChild(item);
 
@@ -273,13 +350,40 @@ function renderCoffrets() {
     opt.textContent = c.name;
     select.appendChild(opt);
   });
+
+  // boutons Modifier
+  list.querySelectorAll("button[data-edit-index]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.editIndex);
+      const coffret = data.coffrets[idx];
+      if (!coffret) return;
+
+      const newName = prompt("Nouveau nom du coffret :", coffret.name);
+      if (!newName) return;
+
+      const newGoalStr = prompt(
+        "Nouvel objectif (FCFA) :",
+        coffret.goal.toString()
+      );
+      const newGoal = Number(newGoalStr);
+      if (isNaN(newGoal) || newGoal <= 0) {
+        alert("Objectif invalide.");
+        return;
+      }
+
+      coffret.name = newName;
+      coffret.goal = newGoal;
+      saveData();
+      renderCoffrets();
+    });
+  });
 }
 
 // ---------- RENDU : METAUX ----------
 
 function renderMetals() {
-  const goldPriceXOF = 40000; // FCFA / g
-  const silverPriceXOF = 500; // FCFA / g
+  const goldPriceXOF = 40000;
+  const silverPriceXOF = 500;
 
   const goldValue = data.metals.goldGrams * goldPriceXOF;
   const silverValue = data.metals.silverGrams * silverPriceXOF;
@@ -335,7 +439,6 @@ function renderCharts() {
     .slice()
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // Ligne : solde cumulé
   const byDate = new Map();
   txs.forEach((t) => {
     const d = t.date;
@@ -358,7 +461,6 @@ function renderCharts() {
     lineData.push(0);
   }
 
-  // Camembert : dépenses par catégorie
   const catMap = new Map();
   txs.forEach((t) => {
     if (t.type !== "expense") return;
@@ -380,19 +482,17 @@ function renderCharts() {
     pieData = [1];
   }
 
-  // palette pastel
   const pieColors = [
-    "#34d399", // vert
-    "#60a5fa", // bleu
-    "#f472b6", // rose
-    "#facc15", // jaune
-    "#fb923c", // orange
-    "#a78bfa", // violet
-    "#4ade80", // vert clair
-    "#fca5a5", // rouge clair
+    "#34d399",
+    "#60a5fa",
+    "#f472b6",
+    "#facc15",
+    "#fb923c",
+    "#a78bfa",
+    "#4ade80",
+    "#fca5a5",
   ];
 
-  // Création / maj graphique ligne
   if (!balanceChart) {
     const ctx = lineCanvas.getContext("2d");
     balanceChart = new Chart(ctx, {
@@ -412,7 +512,7 @@ function renderCharts() {
             backgroundColor: (context) => {
               const { chart } = context;
               const { ctx, chartArea } = chart;
-              if (!chartArea) return "rgba(34, 197, 94, 0)"; // au premier rendu
+              if (!chartArea) return "rgba(34, 197, 94, 0)";
               const gradient = ctx.createLinearGradient(
                 0,
                 chartArea.top,
@@ -452,7 +552,6 @@ function renderCharts() {
     balanceChart.update();
   }
 
-  // Création / maj camembert
   if (!categoryChart) {
     categoryChart = new Chart(pieCanvas.getContext("2d"), {
       type: "pie",
@@ -485,6 +584,109 @@ function renderCharts() {
   }
 }
 
+// ---------- GRAPHIQUES METAUX / CRYPTO ----------
+
+function renderMetalsCryptoCharts() {
+  if (typeof Chart === "undefined") return;
+
+  const metalsCanvas = document.getElementById("metals-chart");
+  const cryptoCanvas = document.getElementById("crypto-chart");
+
+  // METALS
+  if (metalsCanvas) {
+    const labels = data.metalsHistory.map((h) => h.date);
+    const values = data.metalsHistory.map((h) =>
+      convertXOFToActiveNumber(h.totalXOF)
+    );
+
+    if (!metalsChart) {
+      metalsChart = new Chart(metalsCanvas.getContext("2d"), {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Valeur métaux",
+              data: values,
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 0,
+              borderColor: "#facc15",
+              fill: false,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              ticks: { color: "#9ca3af" },
+              grid: { display: false },
+            },
+            y: {
+              ticks: { color: "#9ca3af" },
+              grid: { color: "#111827" },
+            },
+          },
+        },
+      });
+    } else {
+      metalsChart.data.labels = labels;
+      metalsChart.data.datasets[0].data = values;
+      metalsChart.update();
+    }
+  }
+
+  // CRYPTO
+  if (cryptoCanvas) {
+    const labels = data.cryptoHistory.map((h) => h.date);
+    const values = data.cryptoHistory.map((h) =>
+      convertXOFToActiveNumber(h.totalXOF)
+    );
+
+    if (!cryptoChart) {
+      cryptoChart = new Chart(cryptoCanvas.getContext("2d"), {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Valeur crypto",
+              data: values,
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 0,
+              borderColor: "#3b82f6",
+              fill: false,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              ticks: { color: "#9ca3af" },
+              grid: { display: false },
+            },
+            y: {
+              ticks: { color: "#9ca3af" },
+              grid: { color: "#111827" },
+            },
+          },
+        },
+      });
+    } else {
+      cryptoChart.data.labels = labels;
+      cryptoChart.data.datasets[0].data = values;
+      cryptoChart.update();
+    }
+  }
+}
+
 // ---------- NAV / CURRENCY / FILTRES ----------
 
 function setupCurrencySwitch() {
@@ -498,6 +700,7 @@ function setupCurrencySwitch() {
       btn.classList.add("active");
 
       renderDashboard();
+      renderMetalsCryptoCharts();
     });
   });
 }
@@ -513,6 +716,7 @@ function setupFilters() {
     state.filterTo = toInput.value || null;
     renderDashboard();
     renderTransactions();
+    renderBudgetInfo();
   });
 
   resetBtn.addEventListener("click", () => {
@@ -522,14 +726,78 @@ function setupFilters() {
     toInput.value = "";
     renderDashboard();
     renderTransactions();
+    renderBudgetInfo();
   });
+}
+
+// ---------- CATEGORIES PREDEFINIES ----------
+
+const EXPENSE_CATEGORIES = [
+  "dépense boutique",
+  "dépense maison",
+  "GP",
+  "achat Chine",
+  "livraison Chine",
+  "école enfants",
+  "voyage affaire",
+  "autres",
+];
+
+const INCOME_CATEGORIES = [
+  "recettes Dkr",
+  "recettes marché",
+  "vente en gros",
+  "BSK couture",
+  "autres",
+];
+
+function fillCategorySelect(type) {
+  const select = document.getElementById("tx-category");
+  const otherInput = document.getElementById("tx-category-other");
+  if (!select) return;
+
+  const categories =
+    type === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+
+  select.innerHTML = "";
+  categories.forEach((cat) => {
+    const opt = document.createElement("option");
+    opt.value = cat;
+    opt.textContent = cat;
+    select.appendChild(opt);
+  });
+
+  if (select.value === "autres") {
+    otherInput.style.display = "block";
+  } else {
+    otherInput.style.display = "none";
+    otherInput.value = "";
+  }
 }
 
 // ---------- FORMULAIRES ----------
 
 function setupTransactionForm() {
   const form = document.getElementById("transaction-form");
+  const typeSelect = document.getElementById("tx-type");
+  const categorySelect = document.getElementById("tx-category");
+  const otherInput = document.getElementById("tx-category-other");
   const dateInput = form.querySelector('input[name="date"]');
+
+  fillCategorySelect("income");
+
+  typeSelect.addEventListener("change", () => {
+    fillCategorySelect(typeSelect.value);
+  });
+
+  categorySelect.addEventListener("change", () => {
+    if (categorySelect.value === "autres") {
+      otherInput.style.display = "block";
+    } else {
+      otherInput.style.display = "none";
+      otherInput.value = "";
+    }
+  });
 
   const today = new Date().toISOString().split("T")[0];
   dateInput.value = today;
@@ -539,29 +807,62 @@ function setupTransactionForm() {
     const fd = new FormData(form);
 
     const type = fd.get("type");
-    const amount = Number(fd.get("amount"));
+    const rawAmount = Number(fd.get("amount"));
+    const currency = fd.get("currency");
     const date = fd.get("date");
-    const category = fd.get("category");
+    let category = fd.get("category");
     const note = fd.get("note");
 
-    if (!date || isNaN(amount) || amount <= 0) {
+    if (!date || isNaN(rawAmount) || rawAmount <= 0) {
       alert("Vérifie le montant et la date 😉");
       return;
     }
 
-    const tx = { type, amount, date, category, note };
+    if (category === "autres") {
+      const custom = otherInput.value.trim();
+      if (custom) category = custom;
+    }
 
-data.transactions.push(tx);
-saveData();
+    let amountXOF = rawAmount;
+    if (currency === "EUR") {
+      if (!data.rates.EUR) {
+        alert("Taux EUR manquant dans les paramètres.");
+        return;
+      }
+      amountXOF = rawAmount / data.rates.EUR;
+    } else if (currency === "USD") {
+      if (!data.rates.USD) {
+        alert("Taux USD manquant dans les paramètres.");
+        return;
+      }
+      amountXOF = rawAmount / data.rates.USD;
+    }
 
-// 🔁 envoi vers Google Sheets
-sendTransactionToSheet(tx);
+    const tx = {
+      type,
+      amount: amountXOF,
+      date,
+      category,
+      note,
+      originalAmount: rawAmount,
+      originalCurrency: currency,
+    };
 
-form.reset();
-dateInput.value = today;
+    data.transactions.push(tx);
+    saveData();
 
-renderTransactions();
-renderDashboard();
+    if (typeof sendTransactionToSheet === "function") {
+      sendTransactionToSheet(tx);
+    }
+
+    form.reset();
+    typeSelect.value = "income";
+    fillCategorySelect("income");
+    dateInput.value = today;
+
+    renderTransactions();
+    renderDashboard();
+    renderBudgetInfo();
   });
 }
 
@@ -582,20 +883,19 @@ function setupCoffretForms() {
       return;
     }
 
-     data.coffrets.push({ name, goal, balance: 0 });
-  saveData();
+    data.coffrets.push({ name, goal, balance: 0 });
+    saveData();
 
-  // 🔁 sync Google Sheets : création coffret
-  sendCoffretEventToSheet({
-    action: "create",
-    name,
-    goal,
-    amount: 0,
-    balance: 0,
-  });
+    sendCoffretEventToSheet({
+      action: "create",
+      name,
+      goal,
+      amount: 0,
+      balance: 0,
+    });
 
-  createForm.reset();
-  renderCoffrets();
+    createForm.reset();
+    renderCoffrets();
   });
 
   addBtn.addEventListener("click", () => {
@@ -611,22 +911,21 @@ function setupCoffretForms() {
       return;
     }
 
-      data.coffrets[index].balance += amount;
-  const newBalance = data.coffrets[index].balance;
-  const name = data.coffrets[index].name;
+    data.coffrets[index].balance += amount;
+    const newBalance = data.coffrets[index].balance;
+    const name = data.coffrets[index].name;
 
-  amountInput.value = "";
-  saveData();
+    amountInput.value = "";
+    saveData();
 
-  // 🔁 sync Google Sheets : ajout d'argent
-  sendCoffretEventToSheet({
-    action: "deposit",
-    name,
-    amount,
-    balance: newBalance,
-  });
+    sendCoffretEventToSheet({
+      action: "deposit",
+      name,
+      amount,
+      balance: newBalance,
+    });
 
-  renderCoffrets();
+    renderCoffrets();
   });
 }
 
@@ -638,18 +937,25 @@ function setupMetalsForm() {
     const gold = Number(fd.get("gold"));
     const silver = Number(fd.get("silver"));
 
-        data.metals.goldGrams = isNaN(gold) ? 0 : gold;
+    data.metals.goldGrams = isNaN(gold) ? 0 : gold;
     data.metals.silverGrams = isNaN(silver) ? 0 : silver;
+
+    const goldPriceXOF = 40000;
+    const silverPriceXOF = 500;
+    const total =
+      data.metals.goldGrams * goldPriceXOF +
+      data.metals.silverGrams * silverPriceXOF;
+    const today = new Date().toISOString().split("T")[0];
+    data.metalsHistory.push({ date: today, totalXOF: total });
 
     saveData();
 
-    // 🔁 sync Google Sheets : patrimoine métaux
     sendMetalsToSheet({
       goldGrams: data.metals.goldGrams,
       silverGrams: data.metals.silverGrams,
     });
-
     renderMetals();
+    renderMetalsCryptoCharts();
   });
 }
 
@@ -676,17 +982,24 @@ function setupCryptoForm() {
       data.cryptos.push({ symbol, quantity, price });
     }
 
+    const totalValue = data.cryptos.reduce(
+      (sum, c) => sum + c.quantity * c.price,
+      0
+    );
+    const today = new Date().toISOString().split("T")[0];
+    data.cryptoHistory.push({ date: today, totalXOF: totalValue });
+
     saveData();
 
-// 🔁 sync Google Sheets : crypto
-sendCryptoToSheet({
-  symbol,
-  quantity,
-  price,
-});
+    sendCryptoToSheet({
+      symbol,
+      quantity,
+      price,
+    });
 
-form.reset();
-renderCryptos();
+    form.reset();
+    renderCryptos();
+    renderMetalsCryptoCharts();
   });
 }
 
@@ -701,10 +1014,13 @@ document.addEventListener("DOMContentLoaded", () => {
   setupCoffretForms();
   setupMetalsForm();
   setupCryptoForm();
+  setupBudgetForm();
 
   renderDashboard();
   renderTransactions();
   renderCoffrets();
   renderMetals();
   renderCryptos();
+  renderBudgetInfo();
+  renderMetalsCryptoCharts();
 });

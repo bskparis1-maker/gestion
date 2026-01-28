@@ -507,3 +507,29 @@ th {
 .btn.danger:hover {
   filter: brightness(1.05);
 }
+.amount-with-currency {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.amount-with-currency input {
+  flex: 1;
+}
+
+.amount-with-currency select {
+  width: 80px;
+}
+
+.category-with-other {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.category-with-other select {
+  min-width: 140px;
+}
+
+.category-with-other input {
+  flex: 1;
+}
