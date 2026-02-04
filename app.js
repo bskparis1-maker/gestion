@@ -1,4 +1,5 @@
-const SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyF1qbLnw0b9LfRbLwx1tvXqlc7RogHatoigJtG1EzjAUkOGRZNML4_UISB0oniqg/exec";
+const SHEET_WEBHOOK_URL =
+  "https://script.google.com/macros/s/AKfycbyF1qbLnw0b9LfRbLwx1tvXqlc7RogHatoigJtG1EzjAUkOGRZNML4_UISB0oniqg/exec";
 console.log("app.js chargé ✅");
 
 const STORAGE_KEY = "moneyflow-v1";
@@ -25,6 +26,8 @@ let state = {
   activeCurrency: "XOF",
   filterFrom: null,
   filterTo: null,
+  txTypeFilter: "all", // ✅ all | income | expense
+  quickRange: "custom", // ✅ custom | day | week | month | year
 };
 
 let balanceChart = null;
@@ -49,6 +52,18 @@ function saveData() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
+// ---------- UTIL : DATE (corrige les dates Sheets type ...Z) ----------
+
+function normalizeDate(dateVal) {
+  const d = new Date(dateVal);
+  if (!isNaN(d)) return d.toISOString().slice(0, 10);
+
+  if (typeof dateVal === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateVal)) {
+    return dateVal;
+  }
+  return "";
+}
+
 // ---------- SYNC LECTURE GOOGLE SHEETS (JSONP pour éviter CORS) ----------
 
 function jsonp(url) {
@@ -57,7 +72,9 @@ function jsonp(url) {
     const script = document.createElement("script");
 
     const cleanup = () => {
-      try { delete window[cbName]; } catch {}
+      try {
+        delete window[cbName];
+      } catch {}
       if (script.parentNode) script.parentNode.removeChild(script);
     };
 
@@ -83,28 +100,37 @@ async function syncFromSheetOnStartup() {
   try {
     const payload = await jsonp(`${SHEET_WEBHOOK_URL}?kind=all`);
 
-    // On ne remplace que si local est vide (pour éviter d'écraser ton tel/pc)
+    // transactions
     if (Array.isArray(payload.transactions) && data.transactions.length === 0) {
-      data.transactions = payload.transactions;
+      data.transactions = payload.transactions
+        .map((t) => ({ ...t, date: normalizeDate(t.date) }))
+        .filter((t) => t.date);
     }
 
+    // coffrets
     if (Array.isArray(payload.coffrets) && data.coffrets.length === 0) {
       data.coffrets = payload.coffrets;
     }
 
-    if (payload.metals && (data.metals.goldGrams === 0 && data.metals.silverGrams === 0)) {
+    // metals
+    if (
+      payload.metals &&
+      data.metals.goldGrams === 0 &&
+      data.metals.silverGrams === 0
+    ) {
       data.metals = {
         goldGrams: Number(payload.metals.goldGrams) || 0,
-        silverGrams: Number(payload.metals.silverGrams) || 0
+        silverGrams: Number(payload.metals.silverGrams) || 0,
       };
     }
 
+    // cryptos
     if (Array.isArray(payload.cryptos) && data.cryptos.length === 0) {
       data.cryptos = payload.cryptos;
     }
 
-    // Si historique vide, on initialise au moins un point avec l'état actuel
-    const today = new Date().toISOString().split("T")[0];
+    // init historique si vide
+    const today = new Date().toISOString().slice(0, 10);
 
     if (data.metalsHistory.length === 0) {
       const goldPriceXOF = 40000;
@@ -120,7 +146,8 @@ async function syncFromSheetOnStartup() {
         (sum, c) => sum + (Number(c.quantity) || 0) * (Number(c.price) || 0),
         0
       );
-      if (totalValue > 0) data.cryptoHistory.push({ date: today, totalXOF: totalValue });
+      if (totalValue > 0)
+        data.cryptoHistory.push({ date: today, totalXOF: totalValue });
     }
 
     saveData();
@@ -164,17 +191,13 @@ function convertXOFToActiveNumber(xof) {
   return xof * data.rates.USD;
 }
 
-function getMonthKey(dateStr) {
-  const d = new Date(dateStr);
-  if (isNaN(d)) return "";
-  return `${d.getFullYear()}-${d.getMonth() + 1}`;
-}
-
 function isWithinFilter(dateStr) {
   const d = new Date(dateStr);
   if (isNaN(d)) return false;
+
   if (state.filterFrom) {
     const from = new Date(state.filterFrom);
+    from.setHours(0, 0, 0, 0);
     if (d < from) return false;
   }
   if (state.filterTo) {
@@ -186,8 +209,16 @@ function isWithinFilter(dateStr) {
 }
 
 function getFilteredTransactions() {
-  if (!state.filterFrom && !state.filterTo) return data.transactions;
-  return data.transactions.filter((t) => isWithinFilter(t.date));
+  const base = data.transactions || [];
+  const byDate =
+    !state.filterFrom && !state.filterTo
+      ? base
+      : base.filter((t) => isWithinFilter(t.date));
+
+  // ✅ filtre type (all/income/expense) pour les graphiques et tableaux
+  return state.txTypeFilter === "all"
+    ? byDate
+    : byDate.filter((t) => t.type === state.txTypeFilter);
 }
 
 // ---------- ENVOI GOOGLE SHEETS ----------
@@ -284,30 +315,25 @@ function setupBudgetForm() {
   });
 }
 
-// ---------- DASHBOARD ----------
+// ---------- DASHBOARD (✅ respecte période De/À) ----------
 
 function renderDashboard() {
-  const now = new Date();
-  const currentKey = `${now.getFullYear()}-${now.getMonth() + 1}`;
-
   const filtered = getFilteredTransactions();
-  let total = 0;
-  let monthIncome = 0;
-  let monthExpense = 0;
+
+  let incomeSum = 0;
+  let expenseSum = 0;
 
   filtered.forEach((t) => {
     const amount = Number(t.amount) || 0;
-    total += t.type === "income" ? amount : -amount;
-
-    if (getMonthKey(t.date) === currentKey) {
-      if (t.type === "income") monthIncome += amount;
-      else monthExpense += amount;
-    }
+    if (t.type === "income") incomeSum += amount;
+    else expenseSum += amount;
   });
 
-  const incomeFmt = formatByCurrency(monthIncome);
-  const expenseFmt = formatByCurrency(monthExpense);
-  const balanceFmt = formatByCurrency(total);
+  const net = incomeSum - expenseSum;
+
+  const incomeFmt = formatByCurrency(incomeSum);
+  const expenseFmt = formatByCurrency(expenseSum);
+  const balanceFmt = formatByCurrency(net);
 
   document.getElementById("dash-income").textContent = incomeFmt.mainStr;
   document.getElementById("dash-income-detail").textContent = incomeFmt.detailStr;
@@ -321,7 +347,7 @@ function renderDashboard() {
   renderCharts();
 }
 
-// ---------- TRANSACTIONS (table + delete) ----------
+// ---------- TRANSACTIONS (table + delete + filtre type) ----------
 
 function renderTransactions() {
   const tbody = document.getElementById("transactions-body");
@@ -330,6 +356,9 @@ function renderTransactions() {
   const filtered = data.transactions
     .map((t, index) => ({ ...t, _index: index }))
     .filter((t) => isWithinFilter(t.date))
+    .filter((t) =>
+      state.txTypeFilter === "all" ? true : t.type === state.txTypeFilter
+    )
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   filtered.forEach((t) => {
@@ -337,7 +366,7 @@ function renderTransactions() {
     tr.innerHTML = `
       <td>${t.type === "income" ? "Entrée" : "Sortie"}</td>
       <td>${formatNumber(t.amount)} FCFA</td>
-      <td>${t.date}</td>
+      <td>${normalizeDate(t.date)}</td>
       <td>${t.category || ""}</td>
       <td>${t.note || ""}</td>
       <td>
@@ -366,6 +395,19 @@ function renderTransactions() {
     renderDashboard();
     renderBudgetInfo();
   };
+}
+
+// ✅ filtre tableau : Toutes / Entrées / Sorties
+function setupTxTableFilter() {
+  const sel = document.getElementById("tx-filter-type");
+  if (!sel) return;
+
+  sel.value = state.txTypeFilter || "all";
+  sel.addEventListener("change", () => {
+    state.txTypeFilter = sel.value;
+    renderTransactions();
+    renderDashboard(); // pour que stats + graphiques suivent le filtre
+  });
 }
 
 // ---------- COFFRETS ----------
@@ -409,7 +451,10 @@ function renderCoffrets() {
       const newName = prompt("Nouveau nom du coffret :", coffret.name);
       if (!newName) return;
 
-      const newGoalStr = prompt("Nouvel objectif (FCFA) :", coffret.goal.toString());
+      const newGoalStr = prompt(
+        "Nouvel objectif (FCFA) :",
+        coffret.goal.toString()
+      );
       const newGoal = Number(newGoalStr);
       if (isNaN(newGoal) || newGoal <= 0) {
         alert("Objectif invalide.");
@@ -421,12 +466,11 @@ function renderCoffrets() {
       saveData();
       renderCoffrets();
 
-      // option : envoyer event update
       sendCoffretEventToSheet({
         action: "update",
         name: newName,
         goal: newGoal,
-        balance: coffret.balance
+        balance: coffret.balance,
       });
     });
   });
@@ -446,7 +490,9 @@ function renderMetals() {
   const usd = total * data.rates.USD;
 
   const el = document.getElementById("metals-value");
-  el.textContent = `${formatNumber(total)} FCFA • ${formatNumber(eur)} € • ${formatNumber(usd)} $`;
+  el.textContent = `${formatNumber(total)} FCFA • ${formatNumber(
+    eur
+  )} € • ${formatNumber(usd)} $`;
 }
 
 // ---------- CRYPTOS ----------
@@ -474,7 +520,9 @@ function renderCryptos() {
   const eur = total * data.rates.EUR;
   const usd = total * data.rates.USD;
 
-  totalEl.textContent = `${formatNumber(total)} FCFA • ${formatNumber(eur)} € • ${formatNumber(usd)} $`;
+  totalEl.textContent = `${formatNumber(total)} FCFA • ${formatNumber(
+    eur
+  )} € • ${formatNumber(usd)} $`;
 }
 
 // ---------- GRAPHIQUES DASHBOARD ----------
@@ -486,6 +534,8 @@ function renderCharts() {
 
   const txs = getFilteredTransactions()
     .slice()
+    .map((t) => ({ ...t, date: normalizeDate(t.date) }))
+    .filter((t) => t.date)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
   // solde cumulé
@@ -501,8 +551,9 @@ function renderCharts() {
   const lineData = [];
   let cumulative = 0;
 
-  // Important: Map conserve l'ordre d'insertion, donc on re-trie par date
-  const entries = Array.from(byDate.entries()).sort((a, b) => new Date(a[0]) - new Date(b[0]));
+  const entries = Array.from(byDate.entries()).sort(
+    (a, b) => new Date(a[0]) - new Date(b[0])
+  );
   entries.forEach(([date, delta]) => {
     cumulative += delta;
     lineLabels.push(date);
@@ -514,7 +565,7 @@ function renderCharts() {
     lineData.push(0);
   }
 
-  // camembert
+  // camembert (sorties par catégorie)
   const catMap = new Map();
   txs.forEach((t) => {
     if (t.type !== "expense") return;
@@ -535,7 +586,16 @@ function renderCharts() {
     pieData = [1];
   }
 
-  const pieColors = ["#34d399", "#60a5fa", "#f472b6", "#facc15", "#fb923c", "#a78bfa", "#4ade80", "#fca5a5"];
+  const pieColors = [
+    "#34d399",
+    "#60a5fa",
+    "#f472b6",
+    "#facc15",
+    "#fb923c",
+    "#a78bfa",
+    "#4ade80",
+    "#fca5a5",
+  ];
 
   if (!balanceChart) {
     const ctx = lineCanvas.getContext("2d");
@@ -543,24 +603,31 @@ function renderCharts() {
       type: "line",
       data: {
         labels: lineLabels,
-        datasets: [{
-          label: "Solde",
-          data: lineData,
-          borderWidth: 2,
-          tension: 0.4,
-          pointRadius: 0,
-          borderColor: "#22c55e",
-          fill: true,
-          backgroundColor: (context) => {
-            const { chart } = context;
-            const { ctx, chartArea } = chart;
-            if (!chartArea) return "rgba(34, 197, 94, 0)";
-            const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-            gradient.addColorStop(0, "rgba(34, 197, 94, 0.35)");
-            gradient.addColorStop(1, "rgba(34, 197, 94, 0)");
-            return gradient;
+        datasets: [
+          {
+            label: "Solde",
+            data: lineData,
+            borderWidth: 2,
+            tension: 0.4,
+            pointRadius: 0,
+            borderColor: "#22c55e",
+            fill: true,
+            backgroundColor: (context) => {
+              const { chart } = context;
+              const { ctx, chartArea } = chart;
+              if (!chartArea) return "rgba(34, 197, 94, 0)";
+              const gradient = ctx.createLinearGradient(
+                0,
+                chartArea.top,
+                0,
+                chartArea.bottom
+              );
+              gradient.addColorStop(0, "rgba(34, 197, 94, 0.35)");
+              gradient.addColorStop(1, "rgba(34, 197, 94, 0)");
+              return gradient;
+            },
           },
-        }]
+        ],
       },
       options: {
         responsive: true,
@@ -568,9 +635,9 @@ function renderCharts() {
         plugins: { legend: { display: false } },
         scales: {
           x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
-          y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
-        }
-      }
+          y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } },
+        },
+      },
     });
   } else {
     balanceChart.data.labels = lineLabels;
@@ -581,14 +648,27 @@ function renderCharts() {
   if (!categoryChart) {
     categoryChart = new Chart(pieCanvas.getContext("2d"), {
       type: "pie",
-      data: { labels: pieLabels, datasets: [{ data: pieData, backgroundColor: pieColors, borderColor: "#020617", borderWidth: 1 }] },
+      data: {
+        labels: pieLabels,
+        datasets: [
+          {
+            data: pieData,
+            backgroundColor: pieColors,
+            borderColor: "#020617",
+            borderWidth: 1,
+          },
+        ],
+      },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { position: "bottom", labels: { color: "#e5e7eb", font: { size: 10 } } }
-        }
-      }
+          legend: {
+            position: "bottom",
+            labels: { color: "#e5e7eb", font: { size: 10 } },
+          },
+        },
+      },
     });
   } else {
     categoryChart.data.labels = pieLabels;
@@ -606,15 +686,27 @@ function renderMetalsCryptoCharts() {
   const cryptoCanvas = document.getElementById("crypto-chart");
 
   if (metalsCanvas) {
-    const labels = data.metalsHistory.map((h) => h.date);
-    const values = data.metalsHistory.map((h) => convertXOFToActiveNumber(h.totalXOF));
+    const labels = (data.metalsHistory || []).map((h) => normalizeDate(h.date));
+    const values = (data.metalsHistory || []).map((h) =>
+      convertXOFToActiveNumber(h.totalXOF)
+    );
 
     if (!metalsChart) {
       metalsChart = new Chart(metalsCanvas.getContext("2d"), {
         type: "line",
         data: {
           labels,
-          datasets: [{ label: "Valeur métaux", data: values, borderWidth: 2, tension: 0.3, pointRadius: 0, borderColor: "#facc15", fill: false }]
+          datasets: [
+            {
+              label: "Valeur métaux",
+              data: values,
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 0,
+              borderColor: "#facc15",
+              fill: false,
+            },
+          ],
         },
         options: {
           responsive: true,
@@ -622,9 +714,9 @@ function renderMetalsCryptoCharts() {
           plugins: { legend: { display: false } },
           scales: {
             x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
-            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
-          }
-        }
+            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } },
+          },
+        },
       });
     } else {
       metalsChart.data.labels = labels;
@@ -634,15 +726,27 @@ function renderMetalsCryptoCharts() {
   }
 
   if (cryptoCanvas) {
-    const labels = data.cryptoHistory.map((h) => h.date);
-    const values = data.cryptoHistory.map((h) => convertXOFToActiveNumber(h.totalXOF));
+    const labels = (data.cryptoHistory || []).map((h) => normalizeDate(h.date));
+    const values = (data.cryptoHistory || []).map((h) =>
+      convertXOFToActiveNumber(h.totalXOF)
+    );
 
     if (!cryptoChart) {
       cryptoChart = new Chart(cryptoCanvas.getContext("2d"), {
         type: "line",
         data: {
           labels,
-          datasets: [{ label: "Valeur crypto", data: values, borderWidth: 2, tension: 0.3, pointRadius: 0, borderColor: "#3b82f6", fill: false }]
+          datasets: [
+            {
+              label: "Valeur crypto",
+              data: values,
+              borderWidth: 2,
+              tension: 0.3,
+              pointRadius: 0,
+              borderColor: "#3b82f6",
+              fill: false,
+            },
+          ],
         },
         options: {
           responsive: true,
@@ -650,9 +754,9 @@ function renderMetalsCryptoCharts() {
           plugins: { legend: { display: false } },
           scales: {
             x: { ticks: { color: "#9ca3af" }, grid: { display: false } },
-            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } }
-          }
-        }
+            y: { ticks: { color: "#9ca3af" }, grid: { color: "#111827" } },
+          },
+        },
       });
     } else {
       cryptoChart.data.labels = labels;
@@ -679,15 +783,51 @@ function setupCurrencySwitch() {
   });
 }
 
+// ✅ filtres avec quick-range (jour/semaine/mois/année)
 function setupFilters() {
   const fromInput = document.getElementById("filter-from");
   const toInput = document.getElementById("filter-to");
   const applyBtn = document.getElementById("filter-apply");
   const resetBtn = document.getElementById("filter-reset");
+  const quick = document.getElementById("quick-range");
+
+  function setRange(mode) {
+    const ref = toInput.value ? new Date(toInput.value) : new Date();
+    const to = new Date(ref);
+    to.setHours(23, 59, 59, 999);
+
+    let from = new Date(ref);
+
+    if (mode === "day") {
+      from.setHours(0, 0, 0, 0);
+    } else if (mode === "week") {
+      from.setDate(from.getDate() - 6);
+      from.setHours(0, 0, 0, 0);
+    } else if (mode === "month") {
+      from = new Date(ref.getFullYear(), ref.getMonth(), 1);
+    } else if (mode === "year") {
+      from = new Date(ref.getFullYear(), 0, 1);
+    } else {
+      return;
+    }
+
+    fromInput.value = from.toISOString().slice(0, 10);
+    toInput.value = ref.toISOString().slice(0, 10);
+  }
+
+  if (quick) {
+    quick.addEventListener("change", () => {
+      state.quickRange = quick.value;
+      if (state.quickRange !== "custom") {
+        setRange(state.quickRange);
+      }
+    });
+  }
 
   applyBtn.addEventListener("click", () => {
     state.filterFrom = fromInput.value || null;
     state.filterTo = toInput.value || null;
+
     renderDashboard();
     renderTransactions();
     renderBudgetInfo();
@@ -696,8 +836,13 @@ function setupFilters() {
   resetBtn.addEventListener("click", () => {
     state.filterFrom = null;
     state.filterTo = null;
+    state.quickRange = "custom";
+
     fromInput.value = "";
     toInput.value = "";
+
+    if (quick) quick.value = "custom";
+
     renderDashboard();
     renderTransactions();
     renderBudgetInfo();
@@ -756,7 +901,9 @@ function setupTransactionForm() {
 
   fillCategorySelect("income");
 
-  typeSelect.addEventListener("change", () => fillCategorySelect(typeSelect.value));
+  typeSelect.addEventListener("change", () =>
+    fillCategorySelect(typeSelect.value)
+  );
   categorySelect.addEventListener("change", () => {
     if (categorySelect.value === "autres") otherInput.style.display = "block";
     else {
@@ -789,7 +936,6 @@ function setupTransactionForm() {
       if (custom) category = custom;
     }
 
-    // conversion vers XOF
     let amountXOF = rawAmount;
     if (currency === "EUR") amountXOF = rawAmount / data.rates.EUR;
     else if (currency === "USD") amountXOF = rawAmount / data.rates.USD;
@@ -797,7 +943,7 @@ function setupTransactionForm() {
     const tx = {
       type,
       amount: amountXOF,
-      date,
+      date: normalizeDate(date),
       category,
       note,
       originalAmount: rawAmount,
@@ -839,7 +985,13 @@ function setupCoffretForms() {
     data.coffrets.push({ name, goal, balance: 0 });
     saveData();
 
-    sendCoffretEventToSheet({ action: "create", name, goal, amount: 0, balance: 0 });
+    sendCoffretEventToSheet({
+      action: "create",
+      name,
+      goal,
+      amount: 0,
+      balance: 0,
+    });
 
     createForm.reset();
     renderCoffrets();
@@ -859,7 +1011,12 @@ function setupCoffretForms() {
     amountInput.value = "";
     saveData();
 
-    sendCoffretEventToSheet({ action: "deposit", name, amount, balance: newBalance });
+    sendCoffretEventToSheet({
+      action: "deposit",
+      name,
+      amount,
+      balance: newBalance,
+    });
 
     renderCoffrets();
   });
@@ -882,11 +1039,14 @@ function setupMetalsForm() {
       data.metals.goldGrams * goldPriceXOF +
       data.metals.silverGrams * silverPriceXOF;
 
-    const today = new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().slice(0, 10);
     data.metalsHistory.push({ date: today, totalXOF: total });
 
     saveData();
-    sendMetalsToSheet({ goldGrams: data.metals.goldGrams, silverGrams: data.metals.silverGrams });
+    sendMetalsToSheet({
+      goldGrams: data.metals.goldGrams,
+      silverGrams: data.metals.silverGrams,
+    });
 
     renderMetals();
     renderMetalsCryptoCharts();
@@ -903,7 +1063,13 @@ function setupCryptoForm() {
     const quantity = Number(fd.get("amount"));
     const price = Number(fd.get("price"));
 
-    if (!symbol || isNaN(quantity) || quantity < 0 || isNaN(price) || price <= 0) {
+    if (
+      !symbol ||
+      isNaN(quantity) ||
+      quantity < 0 ||
+      isNaN(price) ||
+      price <= 0
+    ) {
       alert("Vérifie les infos crypto.");
       return;
     }
@@ -920,7 +1086,7 @@ function setupCryptoForm() {
       (sum, c) => sum + (Number(c.quantity) || 0) * (Number(c.price) || 0),
       0
     );
-    const today = new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().slice(0, 10);
     data.cryptoHistory.push({ date: today, totalXOF: totalValue });
 
     saveData();
@@ -942,6 +1108,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   setupCurrencySwitch();
   setupFilters();
+  setupTxTableFilter(); // ✅
   setupTransactionForm();
   setupCoffretForms();
   setupMetalsForm();
