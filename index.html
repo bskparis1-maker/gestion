@@ -47,8 +47,19 @@
               <div class="dashboard-filters">
                 <label for="filter-from">De</label>
                 <input type="date" id="filter-from" />
+
                 <label for="filter-to">À</label>
                 <input type="date" id="filter-to" />
+
+                <!-- ✅ NOUVEAU : choix rapide de période -->
+                <select id="quick-range" class="small-select" aria-label="Période">
+                  <option value="custom">Période: Personnalisée</option>
+                  <option value="day">Jour</option>
+                  <option value="week">Semaine</option>
+                  <option value="month">Mois</option>
+                  <option value="year">Année</option>
+                </select>
+
                 <button id="filter-apply" class="btn small">Filtrer</button>
                 <button id="filter-reset" class="btn small ghost">Réinitialiser</button>
               </div>
@@ -135,6 +146,16 @@
 
               <button type="submit" class="btn">Ajouter</button>
             </form>
+
+            <!-- ✅ NOUVEAU : filtre du tableau (toutes / entrées / sorties) -->
+            <div class="table-tools" style="margin: 0.5rem 0 0.7rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+              <label for="tx-filter-type" style="font-size:0.85rem; color:#9ca3af;">Afficher :</label>
+              <select id="tx-filter-type">
+                <option value="all">Toutes</option>
+                <option value="income">Entrées</option>
+                <option value="expense">Sorties</option>
+              </select>
+            </div>
 
             <div class="table-responsive">
               <table>
